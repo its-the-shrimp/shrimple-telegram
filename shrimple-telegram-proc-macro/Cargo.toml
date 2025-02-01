@@ -3,7 +3,8 @@ name = "shrimple-telegram-proc-macro"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Implementation detail of shrimple-telegram. Do not use directa
+description = "Implementation detail of shrimple-telegram. Do not use directly"
+repository = "https://github.com/its-the-shrimp/shrimple-telegram"
 
 [lib]
 proc-macro = true

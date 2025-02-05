@@ -1,13 +1,31 @@
 use {
     serde::{
-        de::{self, Visitor},
-        ser::{SerializeStruct, SerializeStructVariant},
+        de::{self, DeserializeOwned, Error, Unexpected, Visitor},
         Deserialize, Deserializer, Serialize, Serializer,
     },
-    std::{borrow::Cow, fmt::Formatter, marker::PhantomData},
+    shrimple_telegram_proc_macro::telegram_type,
+    std::{borrow::Cow, fmt::Formatter, marker::PhantomData, num::NonZero},
 };
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct True;
+
+impl<'de> Deserialize<'de> for True {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if !bool::deserialize(d)? {
+            return Err(D::Error::invalid_value(Unexpected::Bool(false), &"`true`"));
+        }
+        Ok(Self)
+    }
+}
+
+impl Serialize for True {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        true.serialize(s)
+    }
+}
+
+#[telegram_type]
 pub struct BotCommand<'src> {
     pub command: Cow<'src, str>,
     pub description: Cow<'src, str>,
@@ -15,7 +33,29 @@ pub struct BotCommand<'src> {
 
 pub type UpdateId = u64;
 
-#[derive(Debug, Deserialize)]
+#[telegram_type(copy)]
+pub enum AllowedUpdate {
+    CallbackQuery,
+    ChannelPost,
+    ChatBoost,
+    ChatJoinRequest,
+    ChatMember,
+    ChosenInlineResult,
+    EditedChannelPost,
+    EditedMessage,
+    InlineQuery,
+    Message,
+    MessageReaction,
+    MessageReactionCount,
+    MyChatMember,
+    Poll,
+    PollAnswer,
+    PreCheckoutQuery,
+    RemovedChatBoost,
+    ShippingQuery,
+}
+
+#[telegram_type]
 pub struct Update {
     #[serde(rename = "update_id")]
     pub id: u64,
@@ -24,31 +64,33 @@ pub struct Update {
 }
 
 impl Update {
-    pub const fn from(&self) -> Option<&User> {
-        match &self.kind {
-            UpdateKind::Message(m) => m.from.as_ref(),
-            UpdateKind::CallbackQuery(q) => Some(&q.from),
-        }
+    pub fn from(&self) -> Option<&User> {
+        self.kind.from()
     }
 
-    pub const fn chat(&self) -> Option<&Chat> {
-        match &self.kind {
-            UpdateKind::Message(m) => Some(&m.chat),
-            UpdateKind::CallbackQuery(_) => None,
-        }
+    pub fn chat(&self) -> Option<&Chat> {
+        self.kind.chat()
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[telegram_type(common_fields {
+    #[optional] from: User,
+    #[optional] chat: Chat,
+})]
 pub enum UpdateKind {
-    Message(Message),
+    #[telegram_type(nested_fields(from = &field0.from))]
     CallbackQuery(CallbackQuery),
+    #[telegram_type(nested_fields(from = field0.from.as_ref()?, chat = &field0.chat))]
+    ChannelPost(Message),
+    #[telegram_type(nested_fields(chat = &field0.chat))]
+    ChatBoost(ChatBoostUpdated),
+    #[telegram_type(nested_fields(from = field0.from.as_ref()?, chat = &field0.chat))]
+    Message(Message),
 }
 
-pub type MessageId = i32;
+pub type MessageId = NonZero<i32>;
 
-#[derive(Debug, Deserialize)]
+#[telegram_type]
 pub struct Message {
     #[serde(rename = "message_id")]
     pub id: MessageId,
@@ -58,13 +100,12 @@ pub struct Message {
     pub kind: MessageKind,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[telegram_type(untagged)]
 pub enum MessageKind {
     Common(MessageCommon),
 }
 
-#[derive(Debug, Deserialize)]
+#[telegram_type]
 pub struct MessageCommon {
     pub from: Option<User>,
     pub sender_chat: Option<Chat>,
@@ -73,30 +114,24 @@ pub struct MessageCommon {
     pub media_kind: MediaKind,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[telegram_type(untagged)]
 pub enum MediaKind {
     Text {
         text: Box<str>,
         #[serde(default)]
         entities: Box<[MessageEntity]>,
     },
-    Audio {
-        audio: File,
-    },
-    Video {
-        video: File,
-    },
-    Photo {
-        #[serde(deserialize_with = "deserialize_first")]
-        photo: File,
-    },
-    Document {
-        document: File,
-    },
+    #[telegram_type(name_all(audio))]
+    Audio(File),
+    #[telegram_type(name_all(video))]
+    Video(File),
+    #[telegram_type(name_all(photo))]
+    Photo(Vec<File>),
+    #[telegram_type(name_all(document))]
+    Document(File),
 }
 
-#[derive(Debug, Deserialize)]
+#[telegram_type]
 pub struct MessageEntity {
     pub length: usize,
     pub offset: usize,
@@ -104,15 +139,15 @@ pub struct MessageEntity {
     pub kind: MessageEntityKind,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[telegram_type]
+#[serde(tag = "type")]
 pub enum MessageEntityKind {
     BotCommand,
     #[serde(other)]
     Other,
 }
 
-#[derive(Debug, Deserialize)]
+#[telegram_type]
 pub struct File {
     #[serde(rename = "file_id")]
     pub id: Box<str>,
@@ -120,9 +155,9 @@ pub struct File {
 
 pub type UserId = i64;
 
-#[derive(Debug, Deserialize)]
+#[telegram_type]
 pub struct User {
-    pub id: i64,
+    pub id: UserId,
     pub is_bot: bool,
     pub first_name: Box<str>,
     pub last_name: Option<Box<str>>,
@@ -142,15 +177,14 @@ impl User {
 
 pub type ChatId = i64;
 
-#[derive(Debug, Deserialize)]
+#[telegram_type]
 pub struct Chat {
     pub id: ChatId,
     #[serde(flatten)]
     pub kind: ChatKind,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[telegram_type(untagged)]
 pub enum ChatKind {
     Public {
         title: Option<Box<str>>,
@@ -162,98 +196,38 @@ pub enum ChatKind {
     },
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[telegram_type]
+#[serde(tag = "type")]
 pub enum PublicChatKind {
     Channel,
     Group,
-    SuperGroup,
+    Supergroup,
 }
 
-fn serialize_remove_keyboard<S: Serializer>(s: S) -> Result<S::Ok, S::Error> {
-    let mut s = s.serialize_struct_variant("ReplyMarkup", 2, "Remove", 1)?;
-    s.serialize_field("remove_keyboard", &true)?;
-    s.end()
-}
-
-#[derive(Debug, Serialize, Default)]
-#[serde(untagged)]
+#[telegram_type(untagged)]
 pub enum ReplyMarkup<'src> {
     Keyboard(KeyboardMarkup<'src>),
     InlineKeyboard(InlineKeyboardMarkup<'src>),
-    #[serde(serialize_with = "serialize_remove_keyboard")]
+    #[telegram_type(phantom_fields(remove_keyboard: True))]
     Remove,
     ForceReply(ForceReply<'src>),
-    #[default]
     #[serde(serialize_with = "Serializer::serialize_none")]
     None,
 }
 
-impl<'src> From<InlineKeyboardMarkup<'src>> for ReplyMarkup<'src> {
-    fn from(value: InlineKeyboardMarkup<'src>) -> Self {
-        Self::InlineKeyboard(value)
-    }
-}
-
-impl<'src> From<KeyboardMarkup<'src>> for ReplyMarkup<'src> {
-    fn from(value: KeyboardMarkup<'src>) -> Self {
-        Self::Keyboard(value)
-    }
-}
-
-impl<'src> From<ForceReply<'src>> for ReplyMarkup<'src> {
-    fn from(value: ForceReply<'src>) -> Self {
-        Self::ForceReply(value)
-    }
-}
-
-impl ReplyMarkup<'_> {
-    /// Returns `true` if the reply markup doesn't represent any kind of markup.
-    pub fn is_none(&self) -> bool {
-        matches!(self, Self::None)
-    }
-}
-
-#[derive(Debug, Default)]
+#[telegram_type(name_all(keyboard))]
 pub struct KeyboardMarkup<'src>(pub Vec<Vec<KeyboardButton<'src>>>);
 
-impl Serialize for KeyboardMarkup<'_> {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut s = s.serialize_struct("KeyboardMarkup", 1)?;
-        s.serialize_field("keyboard", &self.0)?;
-        s.end()
-    }
-}
-
-#[derive(Debug, Default)]
+#[telegram_type(name_all(inline_keyboard))]
 pub struct InlineKeyboardMarkup<'src>(pub Vec<Vec<InlineKeyboardButton<'src>>>);
 
-impl Serialize for InlineKeyboardMarkup<'_> {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut s = s.serialize_struct("InlineKeyboardMarkup", 1)?;
-        s.serialize_field("inline_keyboard", &self.0)?;
-        s.end()
-    }
-}
-
-#[derive(Debug, Default)]
+#[telegram_type(phantom_fields(force_reply: True))]
+#[derive(Default)]
 pub struct ForceReply<'src> {
-    pub input_field_placeholder: Option<&'src str>,
+    pub input_field_placeholder: Option<Cow<'src, str>>,
 }
 
-impl Serialize for ForceReply<'_> {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut s =
-            s.serialize_struct("ForceReply", 1 + self.input_field_placeholder.is_some() as usize)?;
-        s.serialize_field("force_reply", &true)?;
-        if let Some(input_field_placeholder) = self.input_field_placeholder {
-            s.serialize_field("input_field_placeholder", input_field_placeholder)?;
-        }
-        s.end()
-    }
-}
-
-#[derive(Debug, Serialize)]
+#[telegram_type]
 pub struct KeyboardButton<'src> {
     pub text: Cow<'src, str>,
 }
@@ -264,7 +238,7 @@ impl<'src, T: Into<Cow<'src, str>>> From<T> for KeyboardButton<'src> {
     }
 }
 
-#[derive(Debug, Default, Serialize)]
+#[telegram_type]
 pub struct InlineKeyboardButton<'src> {
     pub text: Cow<'src, str>,
     #[serde(skip_serializing_if = "str::is_empty")]
@@ -273,7 +247,7 @@ pub struct InlineKeyboardButton<'src> {
     pub url: Cow<'src, str>,
 }
 
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ParseMode {
     #[serde(rename = "MarkdownV2")]
     Markdown,
@@ -281,7 +255,7 @@ pub enum ParseMode {
     Html,
 }
 
-#[derive(Debug, Deserialize)]
+#[telegram_type]
 pub struct CallbackQuery {
     pub id: Box<str>,
     pub from: User,
@@ -290,8 +264,7 @@ pub struct CallbackQuery {
     pub message: Option<CallbackQueryMessage>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[telegram_type(untagged)]
 pub enum CallbackQueryMessage {
     Message {
         message: Message,
@@ -301,6 +274,47 @@ pub enum CallbackQueryMessage {
         id: Box<str>,
     },
 }
+
+#[telegram_type]
+pub struct ChatBoostUpdated {
+    pub chat: Chat,
+    pub boost: ChatBoost,
+}
+
+#[telegram_type]
+pub struct ChatBoost {
+    #[serde(rename = "boost_id")]
+    pub id: Box<str>,
+    pub add_date: Date,
+    pub expiration_date: Date,
+    pub source: ChatBoostSource,
+}
+
+#[telegram_type]
+#[serde(tag = "source")]
+pub enum ChatBoostSource {
+    GiftCode {
+        user: User,
+    },
+    Giveaway {
+        user: User,
+        #[serde(deserialize_with = "deserialize_via_try_into::<i32, _, _>")]
+        giveaway_message_id: Option<MessageId>,
+        #[serde(default)]
+        prize_star_count: u32,
+        #[serde(default)]
+        is_unclaimed: bool,
+    },
+    Premium {
+        user: User,
+    },
+}
+
+#[telegram_type(copy)]
+#[serde(transparent)]
+// TODO: feature-gated parsing as a date
+/// A date represented as a Unix timestamp.
+pub struct Date(pub i64);
 
 fn deserialize_first<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
     deserializer: D,
@@ -319,4 +333,12 @@ fn deserialize_first<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
     }
 
     deserializer.deserialize_seq(First(PhantomData))
+}
+
+fn deserialize_via_try_into<'de, Medium, Out, D>(d: D) -> Result<Option<Out>, D::Error>
+where
+    D: Deserializer<'de>,
+    Medium: DeserializeOwned + TryInto<Out>,
+{
+    Medium::deserialize(d).map(|x| x.try_into().ok())
 }

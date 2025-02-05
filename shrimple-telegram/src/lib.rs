@@ -6,9 +6,7 @@ pub mod methods;
 pub mod types;
 
 use {
-    reqwest::{
-        multipart::Form, Url,
-    },
+    reqwest::{multipart::Form, Url},
     serde::{
         de::{DeserializeOwned, Error as _},
         ser::{Impossible, SerializeStruct},
@@ -397,8 +395,7 @@ impl Serializer for FormFiller {
 }
 
 fn serialise_into_form<R: Request>(req: &R) -> Form {
-    req.serialize(FormFiller(Some(Form::new())))
-        .expect("request to be a struct")
+    req.serialize(FormFiller(Some(Form::new()))).expect("request to be a struct")
 }
 
 /// A builder for the [`Bot`] that allows for customising the API URL & the HTTPS client config used

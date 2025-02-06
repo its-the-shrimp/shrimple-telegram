@@ -6,15 +6,14 @@ pub mod methods;
 pub mod types;
 
 use {
-    reqwest::{multipart::Form, Url},
+    reqwest::{header::{HeaderValue, CONTENT_TYPE}, multipart::Form, Url},
     serde::{
         de::{DeserializeOwned, Error as _},
         ser::{Impossible, SerializeStruct},
         Deserialize, Serialize, Serializer,
     },
     std::{
-        fmt::{Display, Formatter},
-        sync::Arc,
+        fmt::{Display, Formatter}, future::Future, pin::Pin, sync::Arc
     },
 };
 
@@ -476,11 +475,11 @@ impl Bot {
     }
 
     fn client(&self) -> &reqwest::Client {
-        &self.0 .0
+        &self.0.0
     }
 
     fn base(&self) -> &Url {
-        &self.0 .1
+        &self.0.1
     }
 
     /*
@@ -496,4 +495,33 @@ impl Bot {
         Self::prepared_request::<R>(req)
     }
     */
+
+    /// Factored out to reduce code size 
+    pub(crate) fn request<R: DeserializeOwned>(&self, method: &'static str, json: String)
+        -> Pin<Box<dyn Future<Output = Result<R>> + Send + Sync + 'static>>
+    {
+        let mut url = self.base().clone();
+        if let Ok(mut segments) = url.path_segments_mut() {
+            segments.push(method);
+        }
+        let req = self.client().get(url).body(json)
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        Box::pin(async move {
+            let (client, req) = req.build_split();
+            let req = req?;
+
+            match client.execute(req).await?.json().await? {
+                TelegramResponse { ok: true, result: Some(result), .. } => Ok(result),
+                TelegramResponse { mut description, .. } => Err({
+                    description.insert_str(0, ": Telegram API error: ");
+                    description.insert_str(0, stringify!(#(self.name)));
+                    crate::Error::Response {
+                        method_name: stringify!(#(self.name)),
+                        description: description.into(),
+                    }
+                }),
+            }
+        })
+    }
 }

@@ -1,6 +1,6 @@
 use {crate::types::*, shrimple_telegram_proc_macro::telegram_request, std::borrow::Cow};
 
-pub trait IsDefault {
+pub(crate) trait IsDefault {
     fn is_default(&self) -> bool;
 }
 
@@ -37,8 +37,9 @@ impl IsDefault for ReplyMarkup<'_> {
     }
 }
 
-#[telegram_request(response_type = bool)]
+#[telegram_request(response_type = True)]
 pub struct AnswerCallbackQuery<'src> {
+    #[telegram_request(via_into)]
     pub callback_query_id: Cow<'src, str>,
     #[telegram_request(optional, via_into)]
     pub text: Cow<'src, str>,
@@ -46,13 +47,13 @@ pub struct AnswerCallbackQuery<'src> {
     pub show_alert: bool,
 }
 
-#[telegram_request(response_type = bool)]
+#[telegram_request(response_type = True)]
 pub struct DeleteMessage {
     pub chat_id: ChatId,
     pub message_id: MessageId,
 }
 
-#[telegram_request(response_type = bool)]
+#[telegram_request(response_type = True)]
 pub struct DeleteWebhook;
 
 #[telegram_request(response_type = Message)]
@@ -147,16 +148,19 @@ pub struct SendVideo<'src> {
     pub reply_to_message_id: Option<MessageId>,
 }
 
-#[telegram_request(response_type = bool)]
+#[telegram_request(response_type = True)]
 pub struct SetMyCommands<'src> {
+    #[telegram_request(via_into)]
     pub commands: Cow<'src, [BotCommand<'src>]>,
     #[telegram_request(optional, via_into)]
     pub language_code: Cow<'src, str>,
 }
 
-#[telegram_request(response_type = bool)]
+#[telegram_request(response_type = True)]
 pub struct SetWebhook<'src> {
+    #[telegram_request(via_into)]
     pub url: Cow<'src, str>,
+    #[telegram_request(optional)]
     pub drop_pending_updates: bool,
     #[telegram_request(optional, via_into)]
     pub secret_token: Cow<'src, str>,

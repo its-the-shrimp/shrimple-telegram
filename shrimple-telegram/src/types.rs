@@ -7,8 +7,9 @@ use {
     std::{borrow::Cow, fmt::Formatter, marker::PhantomData, num::NonZero},
 };
 
+/// a boolean that is always `true`, useful for correct (de)serialization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct True;
+pub struct True;
 
 impl<'de> Deserialize<'de> for True {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -219,6 +220,7 @@ pub enum ReplyMarkup<'src> {
 pub struct KeyboardMarkup<'src>(pub Vec<Vec<KeyboardButton<'src>>>);
 
 #[telegram_type(name_all(inline_keyboard))]
+#[derive(Default)]
 pub struct InlineKeyboardMarkup<'src>(pub Vec<Vec<InlineKeyboardButton<'src>>>);
 
 #[telegram_type(phantom_fields(force_reply: True))]

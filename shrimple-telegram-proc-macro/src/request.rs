@@ -160,7 +160,7 @@ impl InputField {
 
     fn to_setter_tokens(&self, tokens: &mut TokenStream) {
         quote_into! { tokens +=
-            fn #(self.name)(mut self, #{self.to_arg_tokens(tokens)}) -> Self {
+            pub fn #(self.name)(mut self, #{self.to_arg_tokens(tokens)}) -> Self {
                 self.#(self.name) = #(self.name) #{
                     if self.specs.via_into.is_some() {
                         quote_into!(tokens += .into());
@@ -263,7 +263,11 @@ impl Input {
         for attr in &self.attrs {
             quote_into!(dst += #attr);
         }
+
+        let mut doc_name = self.name.to_string();
+        doc_name.make_ascii_lowercase();
         quote_into! { dst +=
+            #[doc = #(format!("[Official docs](https://core.telegram.org/bots/api#{doc_name})"))]
             pub struct #(self.name)<#(self.lifetimes)> {
                 #[serde(skip_serializing)]
                 bot: crate::Bot,
@@ -291,34 +295,23 @@ impl Input {
     fn make_into_future_impl(&self, tokens: &mut TokenStream) {
         quote_into! { tokens +=
             impl<#(self.lifetimes)> ::std::future::IntoFuture for #(self.name)<#(self.lifetimes)> {
-                type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Self::Output>>>;
+                type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Self::Output> + Send + Sync + 'static>>;
                 type Output = crate::Result<#(self.specs.response_type)>;
 
                 fn into_future(self) -> Self::IntoFuture {
-                    use crate::TelegramResponse;
+                    let json = ::serde_json::to_string(&self)
+                        .expect(#(format!("serilaized {} into JSON", self.name)));
+                    self.bot.request(#(self.name.to_string()), json)
+                }
+            }
 
-                    let mut url = self.bot.base().clone();
-                    if let Ok(mut segments) = url.path_segments_mut() {
-                        segments.push(stringify!(#(self.name)));
-                    }
-                    let req = self.bot.client().get(url).json(&self);
-
-                    Box::pin(async move {
-                        let (client, req) = req.build_split();
-                        let req = req?;
-
-                        match client.execute(req).await?.json().await? {
-                            TelegramResponse { ok: true, result: Some(result), .. } => Ok(result),
-                            TelegramResponse { mut description, .. } => Err({
-                                description.insert_str(0, ": Telegram API error: ");
-                                description.insert_str(0, stringify!(#(self.name)));
-                                crate::Error::Response {
-                                    method_name: stringify!(#(self.name)),
-                                    description: description.into(),
-                                }
-                            }),
-                        }
-                    })
+            impl<#(self.lifetimes)> #(self.name)<#(self.lifetimes)> {
+                /// Creates a future without consuming the request. Useful for sending the request
+                /// multiple times.
+                pub fn to_future(&self) -> <Self as ::std::future::IntoFuture>::IntoFuture {
+                    let json = ::serde_json::to_string(self)
+                        .expect(#(format!("serilaized {} into JSON", self.name)));
+                    self.bot.request(#(self.name.to_string()), json)
                 }
             }
         }
@@ -344,9 +337,12 @@ impl Input {
 
     fn make_constructor(&self, tokens: &mut TokenStream) {
         let method_name = Ident::new(&to_snake_case(&self.name.to_string()), self.name.span());
+        let mut doc_name = self.name.to_string();
+        doc_name.make_ascii_lowercase();
 
         quote_into! { tokens +=
             impl crate::Bot {
+                #[doc = #(format!("[Official docs](https://core.telegram.org/bots/api#{doc_name})"))]
                 pub fn #method_name<#(self.lifetimes)>(
                     &self,
                     #{

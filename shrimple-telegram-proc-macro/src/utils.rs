@@ -1,4 +1,4 @@
-use proc_macro2::{Ident, Span, TokenStream, TokenTree};
+use proc_macro2::{Span, TokenStream, TokenTree};
 
 pub(crate) fn expect_punct<const CH: char>(
     tokens: &mut impl Iterator<Item = TokenTree>,
@@ -10,16 +10,6 @@ pub(crate) fn expect_punct<const CH: char>(
             t.map_or_else(last_span, |t| t.span()),
             format_args!("expected `{CH}`"),
         )),
-    }
-}
-
-pub(crate) fn expect_ident(
-    tokens: &mut impl Iterator<Item = TokenTree>,
-    last_span: impl FnOnce() -> Span,
-) -> syn::Result<Ident> {
-    match tokens.next() {
-        Some(TokenTree::Ident(i)) => Ok(i),
-        t => Err(syn::Error::new(t.map_or_else(last_span, |t| t.span()), "expected identifier")),
     }
 }
 

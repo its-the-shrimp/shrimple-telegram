@@ -1,10 +1,17 @@
 use {
+    crate::{Multipart, Result, PAYLOAD_LINK},
+    bytes::{Bytes, BytesMut},
+    reqwest::{multipart::Part, Body},
     serde::{
-        de::{self, DeserializeOwned, Error, Unexpected, Visitor},
+        de::{DeserializeOwned, Error, Unexpected},
         Deserialize, Deserializer, Serialize, Serializer,
     },
     shrimple_telegram_proc_macro::telegram_type,
-    std::{borrow::Cow, fmt::Formatter, marker::PhantomData, num::NonZero},
+    std::{
+        borrow::Cow, fmt::{Debug, Formatter}, io, mem::{replace, take}, num::NonZero, sync::Mutex
+    },
+    tokio::io::{AsyncRead, AsyncReadExt},
+    tokio_util::io::ReaderStream,
 };
 
 /// a boolean that is always `true`, useful for correct (de)serialization
@@ -87,6 +94,8 @@ pub enum UpdateKind {
     ChatBoost(ChatBoostUpdated),
     #[telegram_type(nested_fields(from = field0.from.as_ref()?, chat = &field0.chat))]
     Message(Message),
+    #[serde(other)]
+    Other,
 }
 
 pub type MessageId = NonZero<i32>;
@@ -97,6 +106,7 @@ pub struct Message {
     pub id: MessageId,
     pub from: Option<User>,
     pub chat: Chat,
+    pub date: Date,
     #[serde(flatten)]
     pub kind: MessageKind,
 }
@@ -112,11 +122,11 @@ pub struct MessageCommon {
     pub sender_chat: Option<Chat>,
     pub reply_to_message: Option<Box<Message>>,
     #[serde(flatten)]
-    pub media_kind: MediaKind,
+    pub media: Media,
 }
 
 #[telegram_type(untagged)]
-pub enum MediaKind {
+pub enum Media {
     Text {
         text: Box<str>,
         #[serde(default)]
@@ -181,28 +191,29 @@ pub type ChatId = i64;
 #[telegram_type]
 pub struct Chat {
     pub id: ChatId,
+    pub username: Option<Box<str>>,
     #[serde(flatten)]
     pub kind: ChatKind,
 }
 
-#[telegram_type(untagged)]
-pub enum ChatKind {
-    Public {
-        title: Option<Box<str>>,
-        #[serde(flatten)]
-        kind: PublicChatKind,
-    },
-    Private {
-        username: Option<Box<str>>,
-    },
-}
-
 #[telegram_type]
 #[serde(tag = "type")]
-pub enum PublicChatKind {
-    Channel,
-    Group,
-    Supergroup,
+pub enum ChatKind {
+    Private {
+        first_name: Box<str>,
+        last_name: Option<Box<str>>,
+    },
+    Group {
+        title: Box<str>,
+    },
+    Supergroup {
+        title: Box<str>,
+        #[serde(default)]
+        is_forum: bool,
+    },
+    Channel {
+        title: Box<str>,
+    },
 }
 
 #[telegram_type(untagged)]
@@ -318,23 +329,209 @@ pub enum ChatBoostSource {
 /// A date represented as a Unix timestamp.
 pub struct Date(pub i64);
 
-fn deserialize_first<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<T, D::Error> {
-    struct First<T>(PhantomData<T>);
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct InputFile<'src> {
+    kind: InputFileKind<'src>,
+    #[serde(skip_serializing)]
+    file_name: Option<Cow<'src, str>>,
+}
 
-    impl<'de, T: Deserialize<'de>> Visitor<'de> for First<T> {
-        type Value = T;
-        fn expecting(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a nonempty array")
-        }
-
-        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-            seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(0, &self))
+impl Multipart for InputFile<'_> {
+    fn get_payload(&self) -> Option<Part> {
+        match &self.kind {
+            InputFileKind::UrlOrFileId(_) => None,
+            InputFileKind::Payload(payload) => {
+                let bytes = payload.get_shared();
+                let bytes_len = bytes.len();
+                let mut res = Part::stream_with_length(bytes, bytes_len as u64);
+                if let Some(filename) = self.file_name.as_deref() {
+                    res = res.file_name(filename.to_owned());
+                }
+                Some(res)
+            }
         }
     }
 
-    deserializer.deserialize_seq(First(PhantomData))
+    fn get_payload_mut(&mut self) -> Option<Part> {
+        match &mut self.kind {
+            InputFileKind::UrlOrFileId(_) => None,
+            InputFileKind::Payload(payload) => {
+                let mut res =
+                    match replace(payload, Payload(Mutex::new(PayloadRepr::Owned(vec![]))))
+                        .into_body()
+                    {
+                        (Some(len), body) => Part::stream_with_length(body, len as u64),
+                        (None, body) => Part::stream(body),
+                    };
+                if let Some(filename) = self.file_name.take() {
+                    res = res.file_name(filename.into_owned());
+                }
+                Some(res)
+            }
+        }
+    }
+}
+
+impl<'src> InputFile<'src> {
+    /// Creates an input file that points to a resource on the internet that Telegram should fetch.
+    pub fn url(url: impl Into<Cow<'src, str>>) -> Self {
+        Self { kind: InputFileKind::UrlOrFileId(url.into()), file_name: None }
+    }
+
+    /// Creates an input file that points to a file stored by Telegram by its ID
+    pub fn file_id(file_id: impl Into<Cow<'src, str>>) -> Self {
+        Self { kind: InputFileKind::UrlOrFileId(file_id.into()), file_name: None }
+    }
+
+    /// Creates an input file that's represented by bytes in memory. The ownership of the bytes is
+    /// transferred to the file.
+    pub fn memory(vec: Vec<u8>) -> Self {
+        Self { kind: InputFileKind::Payload(PayloadRepr::Owned(vec).into()), file_name: None }
+    }
+
+    /// Creates an input file that's represented by a shared span of bytes in memory.
+    pub fn shared_memory(bytes: Bytes) -> Self {
+        Self { kind: InputFileKind::Payload(PayloadRepr::Shared(bytes).into()), file_name: None }
+    }
+
+    /// Creates an input file that's represented by an async reader
+    pub fn reader(reader: impl AsyncRead + Send + Sync + Unpin + 'static) -> Self {
+        Self { kind: InputFileKind::Payload(PayloadRepr::Reader(Box::new(reader)).into()), file_name: None }
+    }
+
+    /// Creates an input file from a span of text, either owned or static
+    pub fn text(text: impl Into<Cow<'static, str>>) -> Self {
+        match text.into() {
+            Cow::Owned(text) => Self::memory(text.into_bytes()),
+            Cow::Borrowed(text) => Self::shared_memory(Bytes::from_static(text.as_bytes())),
+        }
+    }
+
+    /// Sets the name of the input file with which it should be labelled in Telegram
+    pub fn file_name(self, file_name: impl Into<Cow<'src, str>>) -> Self {
+        Self { file_name: Some(file_name.into()), ..self }
+    }
+
+    /// Makes the input file reusable by loading a reader into memory, if this input file is backed
+    /// by one. After calling this function, the input file can be cloned and
+    /// [`to_future`](crate::Request::to_future) can be called on the containing request.
+    ///
+    /// Should be called if the file could be backed by a reader and the containing request could be 
+    /// sent more than once.
+    pub async fn reusable(self) -> Result<Self> {
+        Ok(match self.kind {
+            InputFileKind::UrlOrFileId(_) => self,
+            InputFileKind::Payload(p) => Self {
+                kind: InputFileKind::Payload(p.0.into_inner().unwrap().reusable().await?.into()),
+                ..self
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+enum InputFileKind<'src> {
+    UrlOrFileId(Cow<'src, str>),
+    #[serde(serialize_with = "serialize_payload")]
+    Payload(Payload),
+}
+
+fn serialize_payload<S: Serializer>(_: &'_ Payload, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(PAYLOAD_LINK)
+}
+
+struct Payload(Mutex<PayloadRepr>);
+
+impl From<PayloadRepr> for Payload {
+    fn from(repr: PayloadRepr) -> Self {
+        Self(Mutex::new(repr))
+    }
+}
+
+impl PartialEq for Payload {
+    fn eq(&self, other: &Self) -> bool {
+        let (Ok(lhs), Ok(rhs)) = (self.0.try_lock(), other.0.try_lock()) else {
+            return false;
+        };
+        match (&*lhs, &*rhs) {
+            (PayloadRepr::Shared(b1), PayloadRepr::Shared(b2)) => b1 == b2,
+            (PayloadRepr::Owned(v1), PayloadRepr::Owned(v2)) => v1 == v2,
+            _ => false,
+        }
+    }
+}
+
+impl Debug for Payload {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Payload").finish_non_exhaustive()
+    }
+}
+
+impl Clone for Payload {
+    fn clone(&self) -> Self {
+        Self(Mutex::new(PayloadRepr::Shared(self.0.lock().unwrap().make_shared())))
+    }
+}
+
+impl From<Payload> for Body {
+    fn from(payload: Payload) -> Self {
+        match payload.0.into_inner().unwrap() {
+            PayloadRepr::Shared(bytes) => bytes.into(),
+            PayloadRepr::Owned(vec) => vec.into(),
+            PayloadRepr::Reader(reader) => Body::wrap_stream(ReaderStream::new(reader)),
+        }
+    }
+}
+
+impl Payload {
+    fn get_shared(&self) -> Bytes {
+        self.0.lock().unwrap().make_shared()
+    }
+
+    /// Returns the body and, optionally, its length
+    fn into_body(self) -> (Option<usize>, Body) {
+        match self.0.into_inner().unwrap() {
+            PayloadRepr::Shared(bytes) => (bytes.len().into(), bytes.into()),
+            PayloadRepr::Owned(vec) => (vec.len().into(), vec.into()),
+            PayloadRepr::Reader(reader) => (None, Body::wrap_stream(ReaderStream::new(reader))),
+        }
+    }
+}
+
+enum PayloadRepr {
+    Shared(Bytes),
+    Owned(Vec<u8>),
+    Reader(Box<dyn AsyncRead + Send + Sync + Unpin>),
+}
+
+impl PayloadRepr {
+    /// # Panics
+    /// Panics if `self` is `Reader`.
+    fn make_shared(&mut self) -> Bytes {
+        match self {
+            PayloadRepr::Shared(b) => b.clone(),
+            PayloadRepr::Owned(vec) => {
+                let bytes = Bytes::from(take(vec));
+                *self = PayloadRepr::Shared(bytes.clone());
+                bytes
+            }
+            PayloadRepr::Reader(_) => panic!("PayloadRepr::make_shared: can't extract bytes from an async reader"),
+        }
+    }
+
+    async fn reusable(self) -> io::Result<Self> {
+        Ok(Self::Shared(match self {
+            PayloadRepr::Shared(bytes) => bytes,
+            PayloadRepr::Owned(vec) => vec.into(),
+            PayloadRepr::Reader(mut reader) => {
+                let mut buf = BytesMut::new();
+                reader.read_buf(&mut buf).await?;
+                buf.freeze()
+            }
+        }))
+    }
 }
 
 fn deserialize_via_try_into<'de, Medium, Out, D>(d: D) -> Result<Option<Out>, D::Error>
@@ -343,4 +540,36 @@ where
     Medium: DeserializeOwned + TryInto<Out>,
 {
     Medium::deserialize(d).map(|x| x.try_into().ok())
+}
+
+#[test]
+fn f() {
+    serde_json::from_str::<Update>(r#"{
+        "update_id": 171296605,
+        "message": {
+            "message_id": 9941,
+            "from": {
+                "id": 420736786,
+                "is_bot": false,
+                "first_name": "Shrimp",
+                "username": "ItsTheShrimp",
+                "language_code": "ru"
+            },
+            "chat": {
+                "id": 420736786,
+                "first_name": "Shrimp",
+                "username": "ItsTheShrimp",
+                "type": "private"
+            },
+            "date": 1739316330,
+            "text": "/order",
+            "entities": [
+                {
+                    "offset": 0,
+                    "length": 6,
+                    "type": "bot_command"
+                }
+            ]
+        }
+    }"#).unwrap();
 }

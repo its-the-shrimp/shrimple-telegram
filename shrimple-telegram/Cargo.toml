@@ -7,9 +7,12 @@ description = "A library for shrimply running a Telegram bot"
 repository = "https://github.com/its-the-shrimp/shrimple-telegram"
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+bytes = "1.10.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1" }
+tokio-util = { version = "0.7", features = ["io"] }
 shrimple-telegram-proc-macro = { path = "../shrimple-telegram-proc-macro" }
 
 [dev-dependencies]

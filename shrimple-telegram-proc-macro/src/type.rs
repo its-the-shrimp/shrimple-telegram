@@ -318,7 +318,7 @@ impl Repr {
         attrs: &[Attribute],
         original: &InputKind,
     ) {
-        quote_into!(tokens += #[derive(Deserialize, Serialize)]);
+        quote_into!(tokens += #[derive(Deserialize, Serialize)] );
         if untagged.is_some() {
             quote_into!(tokens += #[serde(untagged)])
         } else {
@@ -330,63 +330,67 @@ impl Repr {
         }
 
         match (&self.kind, original) {
-            (ReprKind::Enum { variants }, InputKind::Enum { variants: original_variants, .. }) => quote_into! { tokens +=
-                enum #(self.name) #generics {#{
-                    for v in variants {
-                        quote_into!(tokens += #v,);
+            (ReprKind::Enum { variants }, InputKind::Enum { variants: original_variants, .. }) => {
+                quote_into! { tokens +=
+                    enum #(self.name) #generics {#{
+                        for v in variants {
+                            quote_into!(tokens += #v,);
+                        }
+                    }}
+
+                    #[automatically_derived]
+                    impl #generics From<#(self.name) #generics> for #original_name #generics {
+                        fn from(value: #(self.name) #generics) -> Self {
+                            match value {#{
+                                for (v, original_v) in zip(variants, original_variants) {
+                                    make_variant_pattern(&self.name, &v.ident, &v.fields, tokens);
+                                    quote_into!(tokens += => Self::#(original_v.ident));
+                                    make_field_adapter_expr(&v.fields, &original_v.fields, tokens);
+                                    quote_into!(tokens += ,);
+                                }
+                            }}
+                        }
                     }
-                }}
 
-                #[automatically_derived]
-                impl #generics From<#(self.name) #generics> for #original_name #generics {
-                    fn from(value: #(self.name) #generics) -> Self {
-                        match value {#{
-                            for (v, original_v) in zip(variants, original_variants) {
-                                make_variant_pattern(&self.name, &v.ident, &v.fields, tokens);
-                                quote_into!(tokens += => Self::#(original_v.ident));
-                                make_field_adapter_expr(&v.fields, &original_v.fields, tokens);
-                                quote_into!(tokens += ,);
-                            }
-                        }}
-                    }
-                }
-
-                #[automatically_derived]
-                impl #generics From<#original_name #generics> for #(self.name) #generics {
-                    fn from(value: #original_name #generics) -> Self {
-                        match value {#{
-                            for (original_v, v) in zip(original_variants, variants) {
-                                make_variant_pattern(original_name, &original_v.ident, &original_v.fields, tokens);
-                                quote_into!(tokens += => Self::#(v.ident));
-                                make_field_adapter_expr(&original_v.fields, &v.fields, tokens);
-                                quote_into!(tokens += ,);
-                            }
-                        }}
-                    }
-                }
-            },
-
-            (ReprKind::Struct { fields }, InputKind::Struct { fields: original_fields }) => quote_into! { tokens +=
-                struct #(self.name) #generics #fields
-
-                #[automatically_derived]
-                impl #generics From<#(self.name) #generics> for #original_name #generics {
-                    fn from(#{make_struct_pattern(&self.name, fields, tokens)}: #(self.name) #generics)
-                        -> Self
-                    {
-                        Self #{make_field_adapter_expr(fields, original_fields, tokens)}
+                    #[automatically_derived]
+                    impl #generics From<#original_name #generics> for #(self.name) #generics {
+                        fn from(value: #original_name #generics) -> Self {
+                            match value {#{
+                                for (original_v, v) in zip(original_variants, variants) {
+                                    make_variant_pattern(original_name, &original_v.ident, &original_v.fields, tokens);
+                                    quote_into!(tokens += => Self::#(v.ident));
+                                    make_field_adapter_expr(&original_v.fields, &v.fields, tokens);
+                                    quote_into!(tokens += ,);
+                                }
+                            }}
+                        }
                     }
                 }
+            }
 
-                #[automatically_derived]
-                impl #generics From<#original_name #generics> for #(self.name) #generics {
-                    fn from(#{make_struct_pattern(original_name, original_fields, tokens)}: #original_name #generics)
-                        -> Self
-                    {
-                        Self #{make_field_adapter_expr(original_fields, fields, tokens)}
+            (ReprKind::Struct { fields }, InputKind::Struct { fields: original_fields }) => {
+                quote_into! { tokens +=
+                    struct #(self.name) #generics #fields
+
+                    #[automatically_derived]
+                    impl #generics From<#(self.name) #generics> for #original_name #generics {
+                        fn from(#{make_struct_pattern(&self.name, fields, tokens)}: #(self.name) #generics)
+                            -> Self
+                        {
+                            Self #{make_field_adapter_expr(fields, original_fields, tokens)}
+                        }
+                    }
+
+                    #[automatically_derived]
+                    impl #generics From<#original_name #generics> for #(self.name) #generics {
+                        fn from(#{make_struct_pattern(original_name, original_fields, tokens)}: #original_name #generics)
+                            -> Self
+                        {
+                            Self #{make_field_adapter_expr(original_fields, fields, tokens)}
+                        }
                     }
                 }
-            },
+            }
 
             _ => unreachable!("repr kind and original input kind don't match"),
         }
@@ -455,7 +459,9 @@ impl EnumReprBuilder {
         }
 
         let mut all_variants = all_variants.into_iter();
-        for (src_v, own_v) in zip(all_variants.by_ref().take(self.variants.len()), &mut self.variants) {
+        for (src_v, own_v) in
+            zip(all_variants.by_ref().take(self.variants.len()), &mut self.variants)
+        {
             if own_v.is_none() {
                 *own_v = Some(src_v.clone());
             }
@@ -502,11 +508,7 @@ impl CommonField {
 }
 
 /// Unnamed fields are referred to as `field0`, `field1`, etc.
-fn make_struct_pattern(
-    name: &Ident,
-    fields: &Fields,
-    tokens: &mut TokenStream,
-) {
+fn make_struct_pattern(name: &Ident, fields: &Fields, tokens: &mut TokenStream) {
     if *fields == Fields::Unit {
         name.to_tokens(tokens);
         return;
@@ -655,10 +657,16 @@ impl Input {
                 phantom_fields_spec_span,
                 phantom_fields,
             )?;
-            Some(Repr::new(&src.ident, ReprKind::Struct { fields: FieldsNamed {
-                brace_token: syn::token::Brace { span: name_all_spec_span },
-                named: fields.into_iter().collect(),
-            }.into() }))
+            Some(Repr::new(
+                &src.ident,
+                ReprKind::Struct {
+                    fields: FieldsNamed {
+                        brace_token: syn::token::Brace { span: name_all_spec_span },
+                        named: fields.into_iter().collect(),
+                    }
+                    .into(),
+                },
+            ))
         } else {
             None
         };
@@ -764,7 +772,7 @@ impl Input {
             name: src.ident,
             generics: src.generics,
             copy: specs.copy,
-            untagged: specs.copy,
+            untagged: specs.untagged,
             kind: InputKind::Enum { variants: src.variants.into_iter().collect(), common_fields },
         })
     }
@@ -791,7 +799,7 @@ impl Input {
     }
 
     fn make_type(&self, dst: &mut TokenStream) {
-        quote_into!(dst += #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]);
+        quote_into!(dst += #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)] #[doc = #(format!("untagged: {}", self.untagged.is_some()))]);
         // TODO: apply the span
         if self.copy.is_some() {
             quote_into!(dst += #[derive(Copy)]);

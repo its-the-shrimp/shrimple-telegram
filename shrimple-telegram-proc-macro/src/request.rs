@@ -61,12 +61,14 @@ impl ParseAttrMeta for InputSpecs {
 struct FieldSpecs {
     optional: Option<Span>,
     via_into: Option<Span>,
+    payload: Option<Span>,
 }
 
 impl BitOrAssign for FieldSpecs {
     fn bitor_assign(&mut self, rhs: Self) {
         self.optional = self.optional.or(rhs.optional);
         self.via_into = self.via_into.or(rhs.via_into);
+        self.payload = self.payload.or(rhs.payload);
     }
 }
 
@@ -84,6 +86,8 @@ impl ParseAttrMeta for FieldSpecs {
                         res.optional = Some(ident.span());
                     } else if ident == "via_into" {
                         res.via_into = Some(ident.span());
+                    } else if ident == "payload" {
+                        res.payload = Some(ident.span());
                     } else {
                         return Err(syn::Error::new(ident.span(), "unknown specifier"));
                     }
@@ -114,7 +118,7 @@ impl InputField {
 
         let span = src.span();
         let (mut attrs, specs) = FieldSpecs::from_attrs(src.attrs)?;
-        let specs = specs.unwrap_or(FieldSpecs { optional: None, via_into: None });
+        let specs = specs.unwrap_or(FieldSpecs::default());
 
         if let Some(span) = specs.optional {
             attrs.push(parse_quote_spanned! {
@@ -183,6 +187,7 @@ pub struct Input {
 impl Input {
     pub fn parse(attr: TokenStream) -> impl Parser<Output = Self> {
         move |input: ParseStream| {
+            let attrs = Attribute::parse_outer(input)?;
             let vis = input.parse::<Visibility>()?;
             if !matches!(vis, Visibility::Public(_)) {
                 return Err(syn::Error::new(
@@ -191,8 +196,7 @@ impl Input {
                 ));
             }
 
-            let mut r#struct = input.parse::<ItemStruct>()?;
-            let attr_span = attr.span();
+            let r#struct = input.parse::<ItemStruct>()?;
             let specs = InputSpecs::parse(attr)?;
 
             if let Some(clause) = r#struct.generics.where_clause {
@@ -238,6 +242,10 @@ impl Input {
                 syn::Fields::Unit => vec![],
             };
 
+            if let Some(extra) = fields.iter().filter_map(|f| f.specs.payload).nth(1) {
+                return Err(syn::Error::new(extra, "Only 0 or 1 payload fields may be defined"));
+            }
+
             let mut first_optional_id = None;
             if !fields.iter().enumerate().is_sorted_by_key(|(i, f)| {
                 if f.specs.optional.is_some() && first_optional_id.is_none() {
@@ -251,22 +259,19 @@ impl Input {
                 ));
             }
 
-            r#struct.attrs.insert(
-                0,
-                parse_quote_spanned!(attr_span => #[derive(Clone, ::serde::Serialize)]),
-            );
-            Ok(Self { attrs: r#struct.attrs, name: r#struct.ident, fields, specs, lifetimes })
+            Ok(Self { attrs, name: r#struct.ident, fields, specs, lifetimes })
         }
     }
 
-    fn make_struct(&self, dst: &mut TokenStream) {
+    fn make_struct(&self, tokens: &mut TokenStream) {
         for attr in &self.attrs {
-            quote_into!(dst += #attr);
+            quote_into!(tokens += #attr);
         }
 
         let mut doc_name = self.name.to_string();
         doc_name.make_ascii_lowercase();
-        quote_into! { dst +=
+        quote_into! { tokens +=
+            #[derive(Clone, ::serde::Serialize)]
             #[doc = #(format!("[Official docs](https://core.telegram.org/bots/api#{doc_name})"))]
             pub struct #(self.name)<#(self.lifetimes)> {
                 #[serde(skip_serializing)]
@@ -274,25 +279,55 @@ impl Input {
                 #{
                     for field in &self.fields {
                         for attr in &field.attrs {
-                            quote_into!(dst += #attr);
+                            quote_into!(tokens += #attr);
                         }
-                        quote_into!(dst += pub #(field.name): #(field.ty),);
+                        quote_into!(tokens += pub #(field.name): #(field.ty),);
                     }
                 }
             }
         }
     }
 
-    fn make_request_impl(&self, dst: &mut TokenStream) {
-        quote_into! { dst +=
+    fn make_simple_request_impl(&self, tokens: &mut TokenStream) {
+        quote_into! { tokens +=
             impl<#(self.lifetimes)> crate::Request for #(self.name)<#(self.lifetimes)> {
                 const NAME: &'static str = ::core::stringify!(#(self.name));
                 type Response = #(self.specs.response_type);
+
+                fn to_future(&self) -> impl ::std::future::Future<Output = crate::Result<Self::Response>> {
+                    let json = ::serde_json::to_string(self)
+                        .expect(#(format!("serilaized {} into JSON", self.name)));
+                    self.bot.request(#(self.name.to_string()), json)
+                }
             }
         };
     }
 
-    fn make_into_future_impl(&self, tokens: &mut TokenStream) {
+    fn make_multipart_request_impl(
+        &self,
+        tokens: &mut TokenStream,
+        payload_field: &InputField,
+    ) {
+        quote_into! { tokens +=
+            impl<#(self.lifetimes)> crate::Request for #(self.name)<#(self.lifetimes)> {
+                const NAME: &'static str = ::core::stringify!(#(self.name));
+                type Response = #(self.specs.response_type);
+
+                fn to_future(&self) -> impl ::std::future::Future<Output = crate::Result<Self::Response>> {
+                    if let Some(payload) = crate::Multipart::get_payload(&self.#(payload_field.name)) {
+                        let form = crate::serialise_into_form(self, payload);
+                        self.bot.multipart_request(#(self.name.to_string()), form)
+                    } else {
+                        let json = ::serde_json::to_string(self)
+                            .expect(#(format!("serilaized {} into JSON", self.name)));
+                        self.bot.request(#(self.name.to_string()), json)
+                    }
+                }
+            }
+        };
+    }
+
+    fn make_simple_into_future_impl(&self, tokens: &mut TokenStream) {
         quote_into! { tokens +=
             impl<#(self.lifetimes)> ::std::future::IntoFuture for #(self.name)<#(self.lifetimes)> {
                 type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Self::Output> + Send + Sync + 'static>>;
@@ -304,14 +339,28 @@ impl Input {
                     self.bot.request(#(self.name.to_string()), json)
                 }
             }
+        }
+    }
 
-            impl<#(self.lifetimes)> #(self.name)<#(self.lifetimes)> {
-                /// Creates a future without consuming the request. Useful for sending the request
-                /// multiple times.
-                pub fn to_future(&self) -> <Self as ::std::future::IntoFuture>::IntoFuture {
-                    let json = ::serde_json::to_string(self)
-                        .expect(#(format!("serilaized {} into JSON", self.name)));
-                    self.bot.request(#(self.name.to_string()), json)
+    fn make_multipart_into_future_impl(
+        &self,
+        tokens: &mut TokenStream,
+        payload_field: &InputField,
+    ) {
+        quote_into! { tokens +=
+            impl<#(self.lifetimes)> ::std::future::IntoFuture for #(self.name)<#(self.lifetimes)> {
+                type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Self::Output> + Send + Sync + 'static>>;
+                type Output = crate::Result<#(self.specs.response_type)>;
+
+                fn into_future(mut self) -> Self::IntoFuture {
+                    if let Some(payload) = crate::Multipart::get_payload_mut(&mut self.#(payload_field.name)) {
+                        let form = crate::serialise_into_form(&self, payload);
+                        self.bot.multipart_request(#(self.name.to_string()), form)
+                    } else {
+                        let json = ::serde_json::to_string(&self)
+                            .expect(#(format!("serilaized {} into JSON", self.name)));
+                        self.bot.request(#(self.name.to_string()), json)
+                    }
                 }
             }
         }
@@ -378,12 +427,17 @@ impl Input {
 }
 
 impl ToTokens for Input {
-    fn to_tokens(&self, dst: &mut TokenStream) {
-        self.make_struct(dst);
-        self.make_request_impl(dst);
-        self.make_into_future_impl(dst);
-        self.make_debug_impl(dst);
-        self.make_constructor(dst);
-        self.make_setters(dst);
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        self.make_struct(tokens);
+        if let Some(payload_field) = self.fields.iter().find(|f| f.specs.payload.is_some()) {
+            self.make_multipart_request_impl(tokens, payload_field);
+            self.make_multipart_into_future_impl(tokens, payload_field);
+        } else {
+            self.make_simple_request_impl(tokens);
+            self.make_simple_into_future_impl(tokens);
+        }
+        self.make_debug_impl(tokens);
+        self.make_constructor(tokens);
+        self.make_setters(tokens);
     }
 }

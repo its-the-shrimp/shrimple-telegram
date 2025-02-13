@@ -106,10 +106,14 @@ pub struct SendAudio<'src> {
     pub reply_to_message_id: Option<MessageId>,
 }
 
+/// # Warning
+/// If the input `document` is a stream, attempting to clone this object or turn it into a future
+/// via [`SendDocument::to_future`]
 #[telegram_request(response_type = Message)]
 pub struct SendDocument<'src> {
     pub chat_id: ChatId,
-    pub document: Cow<'src, str>,
+    #[telegram_request(payload)]
+    pub document: InputFile<'src>,
     #[telegram_request(optional, via_into)]
     pub caption: Cow<'src, str>,
     #[telegram_request(optional, via_into)]

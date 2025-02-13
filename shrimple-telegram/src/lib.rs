@@ -6,14 +6,19 @@ pub mod methods;
 pub mod types;
 
 use {
-    reqwest::{header::{HeaderValue, CONTENT_TYPE}, multipart::Form, Url},
+    reqwest::{
+        header::{HeaderValue, CONTENT_TYPE}, multipart::{Form, Part}, RequestBuilder, Url
+    },
     serde::{
         de::{DeserializeOwned, Error as _},
         ser::{Impossible, SerializeStruct},
         Deserialize, Serialize, Serializer,
     },
     std::{
-        fmt::{Display, Formatter}, future::Future, pin::Pin, sync::Arc
+        fmt::{Display, Formatter},
+        future::{Future, IntoFuture},
+        pin::Pin,
+        sync::Arc,
     },
 };
 
@@ -23,20 +28,22 @@ pub type Result<T = (), E = Error> = std::result::Result<T, E>;
 /// An error that can occur while sending a request to Telegram Bot API
 #[derive(Debug)]
 pub enum Error {
-    Request(reqwest::Error),
+    Io(std::io::Error),
+    Request { method_name: &'static str, inner: reqwest::Error },
     Response { method_name: &'static str, description: Box<str> },
 }
 
-impl From<reqwest::Error> for Error {
-    fn from(e: reqwest::Error) -> Self {
-        Self::Request(e)
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
     }
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Request(e) => write!(f, "Error while sending the request: {e}"),
+            Self::Io(e) => write!(f, "IO error: {e}"),
+            Self::Request { method_name, inner } => write!(f, "Error while sending `{method_name}`: {inner}"),
             Self::Response { method_name, description } => {
                 writeln!(f, "Telegram API error from method {method_name}: {description}")
             }
@@ -46,18 +53,20 @@ impl Display for Error {
 
 impl std::error::Error for Error {}
 
-pub trait Request: Serialize {
+pub trait Request: Serialize + IntoFuture<Output = Result<Self::Response>> {
     const NAME: &str;
     type Response: DeserializeOwned;
-}
 
-impl<T: Request> Request for &T {
-    const NAME: &'static str = T::NAME;
-    type Response = T::Response;
+    /// Analogous to [`IntoFuture::into_future`], but creates a future without consuming the
+    /// request.
+    ///
+    /// # Warning
+    ///
+    /// Implementors may panic upon calling this method if the request body may not be shared
+    /// without additional async processing; for an example,
+    /// see [`InputFile`](types::InputFile) and its [`reusable`](types::InputFile::reusable) method.
+    fn to_future(&self) -> impl Future<Output = Result<Self::Response>>;
 }
-
-#[derive(Debug, Clone, Copy)]
-struct NoReturnValue<T>(pub T);
 
 #[derive(Deserialize)]
 struct TelegramResponse<T> {
@@ -393,8 +402,22 @@ impl Serializer for FormFiller {
     }
 }
 
-fn serialise_into_form<R: Request>(req: &R) -> Form {
-    req.serialize(FormFiller(Some(Form::new()))).expect("request to be a struct")
+pub(crate) const PAYLOAD_NAME: &str = "__PAYLOAD";
+pub(crate) const PAYLOAD_LINK: &str = "attach://__PAYLOAD";
+
+pub(crate) fn serialise_into_form<R: Serialize>(req: &R, payload: Part) -> Form {
+    req.serialize(FormFiller(Some(Form::new())))
+        .expect("request to be a struct")
+        .part(PAYLOAD_NAME, payload)
+}
+
+pub(crate) trait Multipart {
+    fn get_payload(&self) -> Option<Part>;
+    /// Exclusive access allows for more performant access.
+    ///
+    /// Implementation may assume that the functions of this trait will never be called again on
+    /// this same value.
+    fn get_payload_mut(&mut self) -> Option<Part>;
 }
 
 /// A builder for the [`Bot`] that allows for customising the API URL & the HTTPS client config used
@@ -475,53 +498,70 @@ impl Bot {
     }
 
     fn client(&self) -> &reqwest::Client {
-        &self.0.0
+        &self.0 .0
     }
 
     fn base(&self) -> &Url {
-        &self.0.1
+        &self.0 .1
     }
 
-    /*
     /// The `payload` will be referred to in the request as "payload"
-    pub fn multipart_request<R: Request>(
+    pub fn multipart_request<R: DeserializeOwned + 'static>(
         &self,
-        req: R,
-        payload: Part,
-    ) -> impl Future<Output = Result<R::Response>> + Send {
-        let req = serialise_into_form(&req).map(|form| {
-            self.client().get(self.make_url::<R>()).multipart(form.part("payload", payload))
-        });
-        Self::prepared_request::<R>(req)
-    }
-    */
-
-    /// Factored out to reduce code size 
-    pub(crate) fn request<R: DeserializeOwned>(&self, method: &'static str, json: String)
-        -> Pin<Box<dyn Future<Output = Result<R>> + Send + Sync + 'static>>
-    {
+        method_name: &'static str,
+        form: Form,
+    ) -> Pin<Box<dyn Future<Output = Result<R>> + Send + Sync + 'static>> {
         let mut url = self.base().clone();
         if let Ok(mut segments) = url.path_segments_mut() {
-            segments.push(method);
+            segments.push(method_name);
         }
-        let req = self.client().get(url).body(json)
+        let req = self.client().get(url).multipart(form);
+
+        Box::pin(Self::prepared_request(method_name, req))
+    }
+
+    /// Factored out to reduce code size
+    pub(crate) fn request<R: DeserializeOwned + 'static>(
+        &self,
+        method_name: &'static str,
+        json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<R>> + Send + Sync + 'static>> {
+        let mut url = self.base().clone();
+        if let Ok(mut segments) = url.path_segments_mut() {
+            segments.push(method_name);
+        }
+        let req = self
+            .client()
+            .get(url)
+            .body(json)
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        Box::pin(async move {
-            let (client, req) = req.build_split();
-            let req = req?;
+        Box::pin(Self::prepared_request(method_name, req))
+    }
 
-            match client.execute(req).await?.json().await? {
-                TelegramResponse { ok: true, result: Some(result), .. } => Ok(result),
-                TelegramResponse { mut description, .. } => Err({
-                    description.insert_str(0, ": Telegram API error: ");
-                    description.insert_str(0, stringify!(#(self.name)));
-                    crate::Error::Response {
-                        method_name: stringify!(#(self.name)),
-                        description: description.into(),
-                    }
-                }),
-            }
-        })
+    async fn prepared_request<R: DeserializeOwned>(
+        method_name: &'static str,
+        req: RequestBuilder,
+    ) -> Result<R> {
+        let (client, req) = req.build_split();
+        let req = req.map_err(|inner| Error::Request { method_name, inner })?;
+
+        match client.execute(req)
+            .await
+            .map_err(|inner| Error::Request { method_name, inner })?
+            .json()
+            .await
+            .map_err(|inner| Error::Request { method_name, inner })?
+        {
+            TelegramResponse { ok: true, result: Some(result), .. } => Ok(result),
+            TelegramResponse { mut description, .. } => Err({
+                description.insert_str(0, ": Telegram API error: ");
+                description.insert_str(0, method_name);
+                crate::Error::Response {
+                    method_name,
+                    description: description.into(),
+                }
+            }),
+        }
     }
 }

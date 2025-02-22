@@ -7,7 +7,9 @@ pub mod types;
 
 use {
     reqwest::{
-        header::{HeaderValue, CONTENT_TYPE}, multipart::{Form, Part}, RequestBuilder, Url
+        header::{HeaderValue, CONTENT_TYPE},
+        multipart::{Form, Part},
+        RequestBuilder, Url,
     },
     serde::{
         de::{DeserializeOwned, Error as _},
@@ -15,15 +17,54 @@ use {
         Deserialize, Serialize, Serializer,
     },
     std::{
+        borrow::Cow,
         fmt::{Display, Formatter},
         future::{Future, IntoFuture},
         pin::Pin,
         sync::Arc,
     },
+    types::ReplyMarkup,
 };
 
 pub const MAX_MSG_LEN: usize = 4096;
 pub type Result<T = (), E = Error> = std::result::Result<T, E>;
+
+trait IsDefault {
+    fn is_default(&self) -> bool;
+}
+
+impl<T> IsDefault for Option<T> {
+    fn is_default(&self) -> bool {
+        self.is_none()
+    }
+}
+
+impl IsDefault for bool {
+    fn is_default(&self) -> bool {
+        !*self
+    }
+}
+
+impl IsDefault for Cow<'_, str> {
+    fn is_default(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<T> IsDefault for Cow<'_, [T]>
+where
+    [T]: ToOwned,
+{
+    fn is_default(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl IsDefault for ReplyMarkup<'_> {
+    fn is_default(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
 
 /// An error that can occur while sending a request to Telegram Bot API
 #[derive(Debug)]
@@ -43,7 +84,9 @@ impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "IO error: {e}"),
-            Self::Request { method_name, inner } => write!(f, "Error while sending `{method_name}`: {inner}"),
+            Self::Request { method_name, inner } => {
+                write!(f, "Error while sending `{method_name}`: {inner}")
+            }
             Self::Response { method_name, description } => {
                 writeln!(f, "Telegram API error from method {method_name}: {description}")
             }
@@ -505,7 +548,15 @@ impl Bot {
         &self.0 .1
     }
 
+    /// Make a manual request to Telegram Bot API using `multipart/form-data`.
+    ///
     /// The `payload` will be referred to in the request as "payload"
+    ///
+    /// # Warning
+    /// This is a low-level method, only use this if the Telegram method is not yet adapted to
+    /// `shrimple-telegram`.
+    /// Consider [opening an issue](https://github.com/its-the-shrimp/shrimple-telegram/issues/new)
+    /// if that's the case.
     pub fn multipart_request<R: DeserializeOwned + 'static>(
         &self,
         method_name: &'static str,
@@ -520,8 +571,14 @@ impl Bot {
         Box::pin(Self::prepared_request(method_name, req))
     }
 
-    /// Factored out to reduce code size
-    pub(crate) fn request<R: DeserializeOwned + 'static>(
+    /// Make a manual request to Telegram Bot API.
+    ///
+    /// # Warning
+    /// This is a low-level method, only use this if the Telegram method is not yet adapted to
+    /// `shrimple-telegram`.
+    /// Consider [opening an issue](https://github.com/its-the-shrimp/shrimple-telegram/issues/new)
+    /// if that's the case.
+    pub fn request<R: DeserializeOwned + 'static>(
         &self,
         method_name: &'static str,
         json: String,
@@ -534,7 +591,7 @@ impl Bot {
             .client()
             .get(url)
             .body(json)
-            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            .header(CONTENT_TYPE, const { HeaderValue::from_static("application/json") });
 
         Box::pin(Self::prepared_request(method_name, req))
     }
@@ -546,7 +603,8 @@ impl Bot {
         let (client, req) = req.build_split();
         let req = req.map_err(|inner| Error::Request { method_name, inner })?;
 
-        match client.execute(req)
+        match client
+            .execute(req)
             .await
             .map_err(|inner| Error::Request { method_name, inner })?
             .json()
@@ -557,10 +615,7 @@ impl Bot {
             TelegramResponse { mut description, .. } => Err({
                 description.insert_str(0, ": Telegram API error: ");
                 description.insert_str(0, method_name);
-                crate::Error::Response {
-                    method_name,
-                    description: description.into(),
-                }
+                crate::Error::Response { method_name, description: description.into() }
             }),
         }
     }

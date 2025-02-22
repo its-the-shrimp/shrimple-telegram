@@ -844,20 +844,20 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shrimple-telegram"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bytes",
  "reqwest",
  "serde",
  "serde_json",
- "shrimple-telegram-proc-macro 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "shrimple-telegram-proc-macro 0.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
  "tokio-util",
 ]
 
 [[package]]
 name = "shrimple-telegram-proc-macro"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "proc-macro2",
  "quote_into",
@@ -866,9 +866,9 @@ dependencies = [
 
 [[package]]
 name = "shrimple-telegram-proc-macro"
-version = "0.0.1"
+version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd196d77b989d2a18595019546932ad5edb88e240cdf131da07a285ac7fb42a0"
+checksum = "ceefb88bb551dbb42384bc8fd7aa40e0cee6b3090328e13d1960c662bcc5be1e"
 dependencies = [
  "proc-macro2",
  "quote_into",

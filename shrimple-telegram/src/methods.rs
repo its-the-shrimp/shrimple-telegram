@@ -1,41 +1,8 @@
-use {crate::types::*, shrimple_telegram_proc_macro::telegram_request, std::borrow::Cow};
-
-pub(crate) trait IsDefault {
-    fn is_default(&self) -> bool;
-}
-
-impl<T> IsDefault for Option<T> {
-    fn is_default(&self) -> bool {
-        self.is_none()
-    }
-}
-
-impl IsDefault for bool {
-    fn is_default(&self) -> bool {
-        !*self
-    }
-}
-
-impl IsDefault for Cow<'_, str> {
-    fn is_default(&self) -> bool {
-        self.is_empty()
-    }
-}
-
-impl<T> IsDefault for Cow<'_, [T]>
-where
-    [T]: ToOwned,
-{
-    fn is_default(&self) -> bool {
-        self.is_empty()
-    }
-}
-
-impl IsDefault for ReplyMarkup<'_> {
-    fn is_default(&self) -> bool {
-        matches!(self, Self::None)
-    }
-}
+use {
+    crate::{types::*, IsDefault},
+    shrimple_telegram_proc_macro::telegram_request,
+    std::borrow::Cow,
+};
 
 #[telegram_request(response_type = True)]
 pub struct AnswerCallbackQuery<'src> {
@@ -107,8 +74,9 @@ pub struct SendAudio<'src> {
 }
 
 /// # Warning
+///
 /// If the input `document` is a stream, attempting to clone this object or turn it into a future
-/// via [`SendDocument::to_future`]
+/// via [`crate::Request::to_future`] will result in a panic
 #[telegram_request(response_type = Message)]
 pub struct SendDocument<'src> {
     pub chat_id: ChatId,
@@ -120,6 +88,27 @@ pub struct SendDocument<'src> {
     pub parse_mode: Option<ParseMode>,
     #[telegram_request(optional, via_into)]
     pub reply_to_message_id: Option<MessageId>,
+    #[telegram_request(optional, via_into)]
+    pub reply_markup: ReplyMarkup<'src>,
+}
+
+// TODO: ReplyParameters
+
+#[telegram_request(response_type = Message)]
+pub struct SendLocation<'src> {
+    pub chat_id: ChatId,
+    #[serde(flatten)]
+    pub location: Location,
+    #[telegram_request(optional, via_into)]
+    pub reply_to_message_id: Option<MessageId>,
+    #[telegram_request(optional, via_into)]
+    pub disable_notification: Option<bool>,
+    #[telegram_request(optional, via_into)]
+    pub protect_content: Option<bool>,
+    #[telegram_request(optional, via_into)]
+    pub allow_paid_broadcast: Option<bool>,
+    #[telegram_request(optional, via_into)]
+    pub message_effect_id: Cow<'src, str>,
     #[telegram_request(optional, via_into)]
     pub reply_markup: ReplyMarkup<'src>,
 }

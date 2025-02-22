@@ -8,7 +8,12 @@ use {
     },
     shrimple_telegram_proc_macro::telegram_type,
     std::{
-        borrow::Cow, fmt::{Debug, Formatter}, io, mem::{replace, take}, num::NonZero, sync::Mutex
+        borrow::Cow,
+        fmt::{Debug, Formatter},
+        io,
+        mem::{replace, take},
+        num::NonZero,
+        sync::Mutex,
     },
     tokio::io::{AsyncRead, AsyncReadExt},
     tokio_util::io::ReaderStream,
@@ -63,7 +68,7 @@ pub enum AllowedUpdate {
     ShippingQuery,
 }
 
-#[telegram_type]
+#[telegram_type(partial_eq)]
 pub struct Update {
     #[serde(rename = "update_id")]
     pub id: u64,
@@ -81,7 +86,7 @@ impl Update {
     }
 }
 
-#[telegram_type(common_fields {
+#[telegram_type(partial_eq, common_fields {
     #[optional] from: User,
     #[optional] chat: Chat,
 })]
@@ -100,7 +105,7 @@ pub enum UpdateKind {
 
 pub type MessageId = NonZero<i32>;
 
-#[telegram_type]
+#[telegram_type(partial_eq)]
 pub struct Message {
     #[serde(rename = "message_id")]
     pub id: MessageId,
@@ -111,12 +116,12 @@ pub struct Message {
     pub kind: MessageKind,
 }
 
-#[telegram_type(untagged)]
+#[telegram_type(untagged, partial_eq)]
 pub enum MessageKind {
     Common(MessageCommon),
 }
 
-#[telegram_type]
+#[telegram_type(partial_eq)]
 pub struct MessageCommon {
     pub from: Option<User>,
     pub sender_chat: Option<Chat>,
@@ -125,7 +130,7 @@ pub struct MessageCommon {
     pub media: Media,
 }
 
-#[telegram_type(untagged)]
+#[telegram_type(untagged, partial_eq)]
 pub enum Media {
     Text {
         text: Box<str>,
@@ -140,6 +145,8 @@ pub enum Media {
     Photo(Vec<File>),
     #[telegram_type(name_all(document))]
     Document(File),
+    #[telegram_type(name_all(location))]
+    Location(Location),
 }
 
 #[telegram_type]
@@ -220,7 +227,7 @@ pub enum ChatKind {
 pub enum ReplyMarkup<'src> {
     Keyboard(KeyboardMarkup<'src>),
     InlineKeyboard(InlineKeyboardMarkup<'src>),
-    #[telegram_type(phantom_fields(remove_keyboard: True))]
+    #[telegram_type(phantom_fields { remove_keyboard: True })]
     Remove,
     ForceReply(ForceReply<'src>),
     #[serde(serialize_with = "Serializer::serialize_none")]
@@ -234,7 +241,7 @@ pub struct KeyboardMarkup<'src>(pub Vec<Vec<KeyboardButton<'src>>>);
 #[derive(Default)]
 pub struct InlineKeyboardMarkup<'src>(pub Vec<Vec<InlineKeyboardButton<'src>>>);
 
-#[telegram_type(phantom_fields(force_reply: True))]
+#[telegram_type(phantom_fields { force_reply: True })]
 #[derive(Default)]
 pub struct ForceReply<'src> {
     pub input_field_placeholder: Option<Cow<'src, str>>,
@@ -268,7 +275,7 @@ pub enum ParseMode {
     Html,
 }
 
-#[telegram_type]
+#[telegram_type(partial_eq)]
 pub struct CallbackQuery {
     pub id: Box<str>,
     pub from: User,
@@ -277,7 +284,8 @@ pub struct CallbackQuery {
     pub message: Option<CallbackQueryMessage>,
 }
 
-#[telegram_type(untagged)]
+// TODO: replace with MaybeInaccessibleMessage
+#[telegram_type(partial_eq, untagged)]
 pub enum CallbackQueryMessage {
     Message {
         message: Message,
@@ -397,7 +405,10 @@ impl<'src> InputFile<'src> {
 
     /// Creates an input file that's represented by an async reader
     pub fn reader(reader: impl AsyncRead + Send + Sync + Unpin + 'static) -> Self {
-        Self { kind: InputFileKind::Payload(PayloadRepr::Reader(Box::new(reader)).into()), file_name: None }
+        Self {
+            kind: InputFileKind::Payload(PayloadRepr::Reader(Box::new(reader)).into()),
+            file_name: None,
+        }
     }
 
     /// Creates an input file from a span of text, either owned or static
@@ -417,7 +428,7 @@ impl<'src> InputFile<'src> {
     /// by one. After calling this function, the input file can be cloned and
     /// [`to_future`](crate::Request::to_future) can be called on the containing request.
     ///
-    /// Should be called if the file could be backed by a reader and the containing request could be 
+    /// Should be called if the file could be backed by a reader and the containing request could be
     /// sent more than once.
     pub async fn reusable(self) -> Result<Self> {
         Ok(match self.kind {
@@ -425,7 +436,7 @@ impl<'src> InputFile<'src> {
             InputFileKind::Payload(p) => Self {
                 kind: InputFileKind::Payload(p.0.into_inner().unwrap().reusable().await?.into()),
                 ..self
-            }
+            },
         })
     }
 }
@@ -517,7 +528,9 @@ impl PayloadRepr {
                 *self = PayloadRepr::Shared(bytes.clone());
                 bytes
             }
-            PayloadRepr::Reader(_) => panic!("PayloadRepr::make_shared: can't extract bytes from an async reader"),
+            PayloadRepr::Reader(_) => {
+                panic!("PayloadRepr::make_shared: can't extract bytes from an async reader")
+            }
         }
     }
 
@@ -534,42 +547,24 @@ impl PayloadRepr {
     }
 }
 
+#[telegram_type(partial_eq)]
+pub struct Location {
+    pub latitude: f64,
+    pub longitude: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal_accuracy: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_period: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proximity_alert_radius: Option<u32>,
+}
+
 fn deserialize_via_try_into<'de, Medium, Out, D>(d: D) -> Result<Option<Out>, D::Error>
 where
     D: Deserializer<'de>,
     Medium: DeserializeOwned + TryInto<Out>,
 {
     Medium::deserialize(d).map(|x| x.try_into().ok())
-}
-
-#[test]
-fn f() {
-    serde_json::from_str::<Update>(r#"{
-        "update_id": 171296605,
-        "message": {
-            "message_id": 9941,
-            "from": {
-                "id": 420736786,
-                "is_bot": false,
-                "first_name": "Shrimp",
-                "username": "ItsTheShrimp",
-                "language_code": "ru"
-            },
-            "chat": {
-                "id": 420736786,
-                "first_name": "Shrimp",
-                "username": "ItsTheShrimp",
-                "type": "private"
-            },
-            "date": 1739316330,
-            "text": "/order",
-            "entities": [
-                {
-                    "offset": 0,
-                    "length": 6,
-                    "type": "bot_command"
-                }
-            ]
-        }
-    }"#).unwrap();
 }

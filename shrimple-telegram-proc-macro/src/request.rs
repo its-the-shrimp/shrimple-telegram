@@ -303,11 +303,7 @@ impl Input {
         };
     }
 
-    fn make_multipart_request_impl(
-        &self,
-        tokens: &mut TokenStream,
-        payload_field: &InputField,
-    ) {
+    fn make_multipart_request_impl(&self, tokens: &mut TokenStream, payload_field: &InputField) {
         quote_into! { tokens +=
             impl<#(self.lifetimes)> crate::Request for #(self.name)<#(self.lifetimes)> {
                 const NAME: &'static str = ::core::stringify!(#(self.name));

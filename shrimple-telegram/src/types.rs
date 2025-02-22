@@ -46,7 +46,7 @@ pub struct BotCommand<'src> {
 
 pub type UpdateId = u64;
 
-#[telegram_type(copy)]
+#[telegram_type(copy, no_doc)]
 pub enum AllowedUpdate {
     CallbackQuery,
     ChannelPost,
@@ -68,7 +68,7 @@ pub enum AllowedUpdate {
     ShippingQuery,
 }
 
-#[telegram_type(partial_eq)]
+#[telegram_type(no_eq)]
 pub struct Update {
     #[serde(rename = "update_id")]
     pub id: u64,
@@ -86,7 +86,7 @@ impl Update {
     }
 }
 
-#[telegram_type(partial_eq, common_fields {
+#[telegram_type(no_doc, no_eq, common_fields {
     #[optional] from: User,
     #[optional] chat: Chat,
 })]
@@ -105,7 +105,7 @@ pub enum UpdateKind {
 
 pub type MessageId = NonZero<i32>;
 
-#[telegram_type(partial_eq)]
+#[telegram_type(no_eq)]
 pub struct Message {
     #[serde(rename = "message_id")]
     pub id: MessageId,
@@ -116,12 +116,12 @@ pub struct Message {
     pub kind: MessageKind,
 }
 
-#[telegram_type(untagged, partial_eq)]
+#[telegram_type(untagged, no_eq, no_doc)]
 pub enum MessageKind {
     Common(MessageCommon),
 }
 
-#[telegram_type(partial_eq)]
+#[telegram_type(no_eq, no_doc)]
 pub struct MessageCommon {
     pub from: Option<User>,
     pub sender_chat: Option<Chat>,
@@ -130,7 +130,7 @@ pub struct MessageCommon {
     pub media: Media,
 }
 
-#[telegram_type(untagged, partial_eq)]
+#[telegram_type(untagged, no_eq, no_doc)]
 pub enum Media {
     Text {
         text: Box<str>,
@@ -157,7 +157,7 @@ pub struct MessageEntity {
     pub kind: MessageEntityKind,
 }
 
-#[telegram_type]
+#[telegram_type(no_doc)]
 #[serde(tag = "type")]
 pub enum MessageEntityKind {
     BotCommand,
@@ -203,7 +203,7 @@ pub struct Chat {
     pub kind: ChatKind,
 }
 
-#[telegram_type]
+#[telegram_type(no_doc)]
 #[serde(tag = "type")]
 pub enum ChatKind {
     Private {
@@ -223,7 +223,7 @@ pub enum ChatKind {
     },
 }
 
-#[telegram_type(untagged)]
+#[telegram_type(untagged, no_doc)]
 pub enum ReplyMarkup<'src> {
     Keyboard(KeyboardMarkup<'src>),
     InlineKeyboard(InlineKeyboardMarkup<'src>),
@@ -275,7 +275,7 @@ pub enum ParseMode {
     Html,
 }
 
-#[telegram_type(partial_eq)]
+#[telegram_type(no_eq)]
 pub struct CallbackQuery {
     pub id: Box<str>,
     pub from: User,
@@ -285,7 +285,7 @@ pub struct CallbackQuery {
 }
 
 // TODO: replace with MaybeInaccessibleMessage
-#[telegram_type(partial_eq, untagged)]
+#[telegram_type(no_eq, untagged, no_doc)]
 pub enum CallbackQueryMessage {
     Message {
         message: Message,
@@ -331,7 +331,7 @@ pub enum ChatBoostSource {
     },
 }
 
-#[telegram_type(copy)]
+#[telegram_type(copy, no_doc)]
 #[serde(transparent)]
 // TODO: feature-gated parsing as a date
 /// A date represented as a Unix timestamp.
@@ -547,7 +547,7 @@ impl PayloadRepr {
     }
 }
 
-#[telegram_type(partial_eq)]
+#[telegram_type(no_eq, copy)]
 pub struct Location {
     pub latitude: f64,
     pub longitude: f64,

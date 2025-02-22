@@ -25,7 +25,8 @@ use {
 struct InputSpecs {
     copy: Option<Span>,
     untagged: Option<Span>,
-    partial_eq: Option<Span>,
+    no_eq: Option<Span>,
+    no_doc: Option<Span>,
     common_fields: Option<(Span, Vec<CommonField>)>,
     phantom_fields: Option<(Span, Vec<(Ident, Type)>)>,
     name_all: Option<(Span, Vec<Ident>)>,
@@ -35,7 +36,7 @@ impl BitOrAssign for InputSpecs {
     fn bitor_assign(&mut self, rhs: Self) {
         self.copy = self.copy.or(rhs.copy);
         self.untagged = self.untagged.or(rhs.untagged);
-        self.partial_eq = self.partial_eq.or(rhs.partial_eq);
+        self.no_eq = self.no_eq.or(rhs.no_eq);
         merge_spans_and_args(&mut self.common_fields, rhs.common_fields);
         merge_spans_and_args(&mut self.phantom_fields, rhs.phantom_fields);
         merge_spans_and_args(&mut self.name_all, rhs.name_all);
@@ -57,8 +58,10 @@ impl ParseAttrMeta for InputSpecs {
                         res.copy = Some(ident.span());
                     } else if ident == "untagged" {
                         res.untagged = Some(ident.span());
-                    } else if ident == "partial_eq" {
-                        res.partial_eq = Some(ident.span());
+                    } else if ident == "no_eq" {
+                        res.no_eq = Some(ident.span());
+                    } else if ident == "no_doc" {
+                        res.no_doc = Some(ident.span());
                     } else if ident == "common_fields" {
                         let group = expect_group(&mut tokens, || ident.span())?;
 
@@ -299,7 +302,8 @@ pub struct Input {
     generics: Generics,
     copy: Option<Span>,
     untagged: Option<Span>,
-    partial_eq: Option<Span>,
+    no_eq: Option<Span>,
+    no_doc: Option<Span>,
     kind: InputKind,
     repr: Option<Repr>,
 }
@@ -501,13 +505,13 @@ struct CommonField {
 }
 
 impl CommonField {
-    fn make_getter_return_type(&self, dst: &mut TokenStream) {
+    fn make_getter_return_type(&self, tokens: &mut TokenStream) {
         if self.optional {
-            quote_into!(dst += Option<);
+            quote_into!(tokens += Option<);
         }
-        quote_into!(dst += &#(self.ty));
+        quote_into!(tokens += &#(self.ty));
         if self.optional {
-            quote_into!(dst += >);
+            quote_into!(tokens += >);
         }
     }
 }
@@ -553,7 +557,7 @@ fn make_variant_pattern(
 ///
 /// If `src` has extra fields, they're ignored.
 ///
-/// If `dst` has extra fields, they're filled in with `Default::default()`
+/// If `tokens` has extra fields, they're filled in with `Default::default()`
 ///
 /// If both field sets are named, they're supposed to have the same ordering.
 fn make_field_adapter_expr(src: &Fields, dst: &Fields, tokens: &mut TokenStream) {
@@ -683,7 +687,8 @@ impl Input {
             kind: InputKind::Struct { fields: src.fields },
             copy: specs.copy,
             untagged: specs.untagged,
-            partial_eq: specs.partial_eq,
+            no_eq: specs.no_eq,
+            no_doc: specs.no_doc,
             repr,
         })
     }
@@ -779,7 +784,8 @@ impl Input {
             generics: src.generics,
             copy: specs.copy,
             untagged: specs.untagged,
-            partial_eq: specs.partial_eq,
+            no_eq: specs.no_eq,
+            no_doc: specs.no_doc,
             kind: InputKind::Enum { variants: src.variants.into_iter().collect(), common_fields },
         })
     }
@@ -805,65 +811,74 @@ impl Input {
         }
     }
 
-    fn make_type(&self, dst: &mut TokenStream) {
-        quote_into!(dst += #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]);
+    fn make_type(&self, tokens: &mut TokenStream) {
+        quote_into!(tokens += #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]);
         // TODO: apply the span
         if self.copy.is_some() {
-            quote_into!(dst += #[derive(Copy)]);
+            quote_into!(tokens += #[derive(Copy)]);
         }
 
-        if self.partial_eq.is_none() {
-            quote_into!(dst += #[derive(Eq)]);
+        if self.no_eq.is_none() {
+            quote_into!(tokens += #[derive(Eq)]);
+        }
+
+        let mut doc_name = self.name.to_string();
+        doc_name.make_ascii_lowercase();
+        if self.no_doc.is_none() {
+            quote_into!(tokens +=
+                #[doc = #(format!("[Official docs](https://core.telegram.org/bots/api#{doc_name})"))]
+                #[doc = ""]
+            );
         }
 
         if let Some(repr) = &self.repr {
             let name = Literal::string(&repr.name.to_string());
-            quote_into!(dst += #[serde(from = #name, into = #name)]);
+            quote_into!(tokens += #[serde(from = #name, into = #name)]);
         } else if self.untagged.is_some() {
-            quote_into!(dst += #[serde(untagged)])
+            quote_into!(tokens += #[serde(untagged)])
         } else {
-            quote_into!(dst += #[serde(rename_all = "snake_case")]);
+            quote_into!(tokens += #[serde(rename_all = "snake_case")]);
         }
 
         for attr in &self.attrs {
-            attr.to_tokens(dst);
+            attr.to_tokens(tokens);
         }
 
         match &self.kind {
-            InputKind::Enum { variants, .. } => quote_into! { dst +=
+            InputKind::Enum { variants, .. } => quote_into! { tokens +=
                 pub enum #(self.name)#(self.generics) {
                     #{
                         for variant in variants {
-                            quote_into!(dst += #variant,);
+                            quote_into!(tokens += #variant,);
                         }
                     }
                 }
             },
-            InputKind::Struct { fields } => quote_into! { dst +=
+            InputKind::Struct { fields } => quote_into! { tokens +=
                 pub struct #(self.name)#(self.generics) #fields
                     #{if !matches!(fields, Fields::Named(_)) {
-                        quote_into!(dst += ;);
+                        quote_into!(tokens += ;);
                     }}
             },
         }
     }
 
-    fn make_common_fields_getters(&self, dst: &mut TokenStream) {
+    fn make_common_fields_getters(&self, tokens: &mut TokenStream) {
         let InputKind::Enum { variants, common_fields } = &self.kind else {
             return;
         };
 
-        quote_into! { dst +=
+        quote_into! { tokens +=
             #[automatically_derived]
             impl #(self.generics) #(self.name)#(self.generics) {#{
                 for field in common_fields {
-                    quote_into! { dst +=
-                        pub fn #(field.name)(&self) -> #{field.make_getter_return_type(dst)} {
+                    quote_into! { tokens +=
+                        pub fn #(field.name)(&self) -> #{field.make_getter_return_type(tokens)} {
                             match self {
                                 #{
                                     for (variant, path) in zip(variants, &field.paths) {
-                                        make_variant_pattern(&self.name, &variant.ident, &variant.fields, dst);
-                                        quote_into!(dst += => #path,);
+                                        make_variant_pattern(&self.name, &variant.ident, &variant.fields, tokens);
+                                        quote_into!(tokens += => #path,);
                                     }
                                 }
                             }
@@ -874,13 +889,13 @@ impl Input {
         }
     }
 
-    fn make_default_impl(&self, dst: &mut TokenStream) {
+    fn make_default_impl(&self, tokens: &mut TokenStream) {
         let InputKind::Enum { variants, .. } = &self.kind else {
             return;
         };
 
         if variants.iter().any(|v| v.ident == "None") {
-            quote_into! { dst +=
+            quote_into! { tokens +=
                 impl #(self.generics) ::std::default::Default for #(self.name) #(self.generics) {
                     fn default() -> Self {
                         Self::None
@@ -890,7 +905,7 @@ impl Input {
         }
     }
 
-    fn make_from_impls(&self, dst: &mut TokenStream) {
+    fn make_from_impls(&self, tokens: &mut TokenStream) {
         let InputKind::Enum { variants, .. } = &self.kind else {
             return;
         };
@@ -911,7 +926,7 @@ impl Input {
                 continue;
             }
 
-            quote_into! { dst +=
+            quote_into! { tokens +=
                 impl #(self.generics) From<#ty> for #(self.name) #(self.generics) {
                     fn from(value: #ty) -> Self {
                         Self::#variant_name(value)
@@ -921,19 +936,19 @@ impl Input {
         }
     }
 
-    fn make_repr(&self, dst: &mut TokenStream) {
+    fn make_repr(&self, tokens: &mut TokenStream) {
         if let Some(repr) = &self.repr {
-            repr.to_tokens(dst, &self.name, &self.generics, self.untagged, &self.attrs, &self.kind);
+            repr.to_tokens(tokens, &self.name, &self.generics, self.untagged, &self.attrs, &self.kind);
         }
     }
 }
 
 impl ToTokens for Input {
-    fn to_tokens(&self, dst: &mut TokenStream) {
-        self.make_type(dst);
-        self.make_common_fields_getters(dst);
-        self.make_default_impl(dst);
-        self.make_from_impls(dst);
-        self.make_repr(dst);
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        self.make_type(tokens);
+        self.make_common_fields_getters(tokens);
+        self.make_default_impl(tokens);
+        self.make_from_impls(tokens);
+        self.make_repr(tokens);
     }
 }

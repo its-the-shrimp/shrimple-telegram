@@ -264,15 +264,19 @@ impl Input {
     }
 
     fn make_struct(&self, tokens: &mut TokenStream) {
+        let mut doc_name = self.name.to_string();
+        doc_name.make_ascii_lowercase();
+        quote_into!(tokens +=
+            #[doc = #(format!("[Official docs](https://core.telegram.org/bots/api#{doc_name})"))]
+            #[doc = ""]
+        );
+
         for attr in &self.attrs {
             quote_into!(tokens += #attr);
         }
 
-        let mut doc_name = self.name.to_string();
-        doc_name.make_ascii_lowercase();
         quote_into! { tokens +=
             #[derive(Clone, ::serde::Serialize)]
-            #[doc = #(format!("[Official docs](https://core.telegram.org/bots/api#{doc_name})"))]
             pub struct #(self.name)<#(self.lifetimes)> {
                 #[serde(skip_serializing)]
                 bot: crate::Bot,

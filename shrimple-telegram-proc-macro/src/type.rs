@@ -25,6 +25,7 @@ use {
 struct InputSpecs {
     copy: Option<Span>,
     untagged: Option<Span>,
+    partial_eq: Option<Span>,
     common_fields: Option<(Span, Vec<CommonField>)>,
     phantom_fields: Option<(Span, Vec<(Ident, Type)>)>,
     name_all: Option<(Span, Vec<Ident>)>,
@@ -34,6 +35,7 @@ impl BitOrAssign for InputSpecs {
     fn bitor_assign(&mut self, rhs: Self) {
         self.copy = self.copy.or(rhs.copy);
         self.untagged = self.untagged.or(rhs.untagged);
+        self.partial_eq = self.partial_eq.or(rhs.partial_eq);
         merge_spans_and_args(&mut self.common_fields, rhs.common_fields);
         merge_spans_and_args(&mut self.phantom_fields, rhs.phantom_fields);
         merge_spans_and_args(&mut self.name_all, rhs.name_all);
@@ -55,6 +57,8 @@ impl ParseAttrMeta for InputSpecs {
                         res.copy = Some(ident.span());
                     } else if ident == "untagged" {
                         res.untagged = Some(ident.span());
+                    } else if ident == "partial_eq" {
+                        res.partial_eq = Some(ident.span());
                     } else if ident == "common_fields" {
                         let group = expect_group(&mut tokens, || ident.span())?;
 
@@ -295,6 +299,7 @@ pub struct Input {
     generics: Generics,
     copy: Option<Span>,
     untagged: Option<Span>,
+    partial_eq: Option<Span>,
     kind: InputKind,
     repr: Option<Repr>,
 }
@@ -678,6 +683,7 @@ impl Input {
             kind: InputKind::Struct { fields: src.fields },
             copy: specs.copy,
             untagged: specs.untagged,
+            partial_eq: specs.partial_eq,
             repr,
         })
     }
@@ -773,6 +779,7 @@ impl Input {
             generics: src.generics,
             copy: specs.copy,
             untagged: specs.untagged,
+            partial_eq: specs.partial_eq,
             kind: InputKind::Enum { variants: src.variants.into_iter().collect(), common_fields },
         })
     }
@@ -799,10 +806,14 @@ impl Input {
     }
 
     fn make_type(&self, dst: &mut TokenStream) {
-        quote_into!(dst += #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)] #[doc = #(format!("untagged: {}", self.untagged.is_some()))]);
+        quote_into!(dst += #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]);
         // TODO: apply the span
         if self.copy.is_some() {
             quote_into!(dst += #[derive(Copy)]);
+        }
+
+        if self.partial_eq.is_none() {
+            quote_into!(dst += #[derive(Eq)]);
         }
 
         if let Some(repr) = &self.repr {

@@ -38,6 +38,8 @@ pub struct EditMessageText<'src> {
     #[telegram_request(via_into)]
     pub text: Cow<'src, str>,
     #[telegram_request(optional, via_into)]
+    pub parse_mode: Option<ParseMode>,
+    #[telegram_request(optional, via_into)]
     pub reply_markup: Option<InlineKeyboardMarkup<'src>>,
 }
 

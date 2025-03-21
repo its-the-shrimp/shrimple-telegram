@@ -237,9 +237,35 @@ pub enum ReplyMarkup<'src> {
 #[telegram_type(name_all(keyboard))]
 pub struct KeyboardMarkup<'src>(pub Vec<Vec<KeyboardButton<'src>>>);
 
+impl<'src, A: IntoIterator<Item = KeyboardButton<'src>>> FromIterator<A> for KeyboardMarkup<'src> {
+    fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
+        Self(Vec::from_iter(iter.into_iter().map(Vec::from_iter)))
+    }
+}
+
+impl<'src> KeyboardMarkup<'src> {
+    /// Collects buttons into a keyboard where every row has exactly 1 button 
+    pub fn from_rows(iter: impl IntoIterator<Item = KeyboardButton<'src>>) -> Self {
+        Self(iter.into_iter().map(|x| vec![x]).collect())
+    }
+}
+
 #[telegram_type(name_all(inline_keyboard))]
 #[derive(Default)]
 pub struct InlineKeyboardMarkup<'src>(pub Vec<Vec<InlineKeyboardButton<'src>>>);
+
+impl<'src, A: IntoIterator<Item = InlineKeyboardButton<'src>>> FromIterator<A> for InlineKeyboardMarkup<'src> {
+    fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
+        Self(Vec::from_iter(iter.into_iter().map(Vec::from_iter)))
+    }
+}
+
+impl<'src> InlineKeyboardMarkup<'src> {
+    /// Collects buttons into a keyboard where every row has exactly 1 button 
+    pub fn from_rows(iter: impl IntoIterator<Item = InlineKeyboardButton<'src>>) -> Self {
+        Self(iter.into_iter().map(|x| vec![x]).collect())
+    }
+}
 
 #[telegram_type(phantom_fields { force_reply: True })]
 #[derive(Default)]
